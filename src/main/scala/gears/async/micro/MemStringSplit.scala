@@ -21,9 +21,9 @@ import java.nio.file.StandardOpenOption
 
 @BenchmarkMode(Array(Mode.Throughput))
 @OutputTimeUnit(TimeUnit.SECONDS)
-@Warmup(iterations = 3, time = 1, timeUnit = TimeUnit.SECONDS)
-@Measurement(iterations = 5, time = 1, timeUnit = TimeUnit.SECONDS)
-@Fork(3)
+@Warmup(iterations = 5, time = 1, timeUnit = TimeUnit.SECONDS)
+@Measurement(iterations = 10, time = 1, timeUnit = TimeUnit.SECONDS)
+@Fork(5)
 @State(Scope.Benchmark)
 class MemStringSplit:
 
@@ -31,15 +31,27 @@ class MemStringSplit:
     Paths.get("src/main/resources/gears/async/micro/lorem.txt")
   )
 
-  @Param(Array("20"/*, "40", "60", "80", "100", "150", "200"*/))
+  @Param(Array("80:20"))
+  var sourceConfig: String = uninitialized
   var numOfContent: Int = uninitialized
+  var firstBufSize: Int = uninitialized
+
+  @Param(Array("10", "50", "200", "600"))
+  var bufSize: Int = uninitialized
 
   var gearsSrc: gstream.Stream[String] = uninitialized
   var fs2Src: fs2.Stream[fs2.Pure, String] = uninitialized
   var rxSrc: rxcore.Flowable[String] = uninitialized
 
+  var fac1: ChannelFactory = uninitialized
+  var fac2: ChannelFactory = uninitialized
+
   @Setup
   def setup(): Unit =
+    val parts = sourceConfig.split(":")
+    numOfContent = parts(0).toInt
+    firstBufSize = parts(1).toInt
+
     gearsSrc = gstream.Stream: out =>
       for i <- 0 to numOfContent
       do out.send(content)
@@ -47,42 +59,17 @@ class MemStringSplit:
     fs2Src = fs2.Stream.emits(List.fill(numOfContent)(content))
     rxSrc = rxcore.Flowable.fromArray(Array.fill(numOfContent)(content)*)
 
-  // @TearDown
-  // def teardown(): Unit =
-  //   Files.writeString(
-  //     Paths.get("results/memstringsplit/stat.txt"),
-  //     buf.mkString(s"$numOfContent (${pos.get()}): ", " ", "\n"),
-  //     StandardOpenOption.APPEND,
-  //     StandardOpenOption.CREATE
-  //   )
-  //   pos.set(0)
-
-  // private val buf: Array[Byte] = new Array[Byte](1000)
-  // private var pos: AtomicInteger = AtomicInteger(0)
-
-  // private def fac(num: Byte) =
-  //   ChannelFactory(
-  //     [T] =>
-  //       () =>
-  //         BufferedStreamChannel(
-  //           10, {
-  //             if Math.random() < 0.1 then
-  //               val p = pos.getAndIncrement()
-  //               if p < buf.size then buf(p) = num
-  //           }
-  //       )
-  //   )
-
-  // val fac1 = ChannelFactory { [T] => () => BufferedStreamChannel[T](5) }
-  // val fac2 = ChannelFactory { [T] => () => BufferedStreamChannel[T](30) }
-  // val fac3 = ChannelFactory { [T] => () => BufferedStreamChannel[T](10) }
+    fac1 = ChannelFactory {
+      [T] => () => BufferedStreamChannel[T](firstBufSize)
+    }
+    fac2 = ChannelFactory { [T] => () => BufferedStreamChannel[T](bufSize) }
 
   @Benchmark
   def gearsBenchmark(): mutable.HashMap[String, Int] =
     Async.blocking:
       gearsSrc
-        .mapMulti(_.split("\\s+")) // (using fac1)
-        .filter(_.length >= 4) // (using fac2)
+        .mapMulti(_.split("\\s+"))(using fac1)
+        .filter(_.length >= 4)(using fac2)
         .run: src =>
           val counts = mutable.HashMap[String, Int]()
           boundary:
@@ -92,7 +79,7 @@ class MemStringSplit:
                   counts.updateWith(word)(_.map(_ + 1).orElse(Some(1)))
                 case _ => boundary.break()
           counts
-      // (using fac3)
+        (using fac2)
 
   @Benchmark
   def fs2Benchmark(): Map[String, Int] =
