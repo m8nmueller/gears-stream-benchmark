@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<style>
+	body {margin: 0; padding: 10px 10px 22px 10px; background-color: #ffffff}
+	h1 {margin: 5px 0 0 0; font-size: 18px; font-weight: normal; text-align: center}
+	header {margin: -24px 0 5px 0; line-height: 24px}
+	button {font: 12px sans-serif; cursor: pointer}
+	p {position: fixed; bottom: 0; margin: 0; padding: 2px 3px 2px 3px; outline: 1px solid #ffc000; display: none; overflow: hidden; white-space: nowrap; background-color: #ffffe0}
+	a {color: #0366d6}
+	#hl {position: absolute; display: none; overflow: hidden; white-space: nowrap; pointer-events: none; background-color: #ffffe0; outline: 1px solid #ffc000; height: 15px}
+	#hl span {padding: 0 3px 0 3px}
+	#status {left: 0}
+	#match {right: 0}
+	#reset {cursor: pointer}
+	#canvas {width: 100%; height: 1088px}
+</style>
+</head>
+<body style='font: 12px Verdana, sans-serif'>
+<h1>CPU profile</h1>
+<header style='text-align: left'><button id='reverse' title='Reverse'>&#x1f53b;</button>&nbsp;&nbsp;<button id='search' title='Search'>&#x1f50d;</button></header>
+<header style='text-align: right'>Produced by <a href='https://github.com/async-profiler/async-profiler'>async-profiler</a></header>
+<canvas id='canvas'></canvas>
+<div id='hl'><span></span></div>
+<p id='status'></p>
+<p id='match'>Matched: <span id='matchval'></span> <span id='reset' title='Clear'>&#x274c;</span></p>
+<script>
+	// Copyright The async-profiler authors
+	// SPDX-License-Identifier: Apache-2.0
+	'use strict';
+	let root, rootLevel, px, pattern;
+	let level0 = 0, left0 = 0, width0 = 0;
+	let reverse = false;
+	const levels = Array(68);
+	for (let h = 0; h < levels.length; h++) {
+		levels[h] = [];
+	}
+
+	const canvas = document.getElementById('canvas');
+	const c = canvas.getContext('2d');
+	const hl = document.getElementById('hl');
+	const status = document.getElementById('status');
+
+	const canvasWidth = canvas.offsetWidth;
+	const canvasHeight = canvas.offsetHeight;
+	canvas.style.width = canvasWidth + 'px';
+	canvas.width = canvasWidth * (devicePixelRatio || 1);
+	canvas.height = canvasHeight * (devicePixelRatio || 1);
+	if (devicePixelRatio) c.scale(devicePixelRatio, devicePixelRatio);
+	c.font = document.body.style.font;
+
+	const palette = [
+		[0xb2e1b2, 20, 20, 20],
+		[0x50e150, 30, 30, 30],
+		[0x50cccc, 30, 30, 30],
+		[0xe15a5a, 30, 40, 40],
+		[0xc8c83c, 30, 30, 10],
+		[0xe17d00, 30, 30,  0],
+		[0xcce880, 20, 20, 20],
+	];
+
+	function getColor(p) {
+		const v = Math.random();
+		return '#' + (p[0] + ((p[1] * v) << 16 | (p[2] * v) << 8 | (p[3] * v))).toString(16);
+	}
+
+	function f(key, level, left, width, inln, c1, int) {
+		levels[level0 = level].push({left: left0 += left, width: width0 = width || width0,
+			color: getColor(palette[key & 7]), title: cpool[key >>> 3],
+			details: (int ? ', int=' + int : '') + (c1 ? ', c1=' + c1 : '') + (inln ? ', inln=' + inln : '')
+		});
+	}
+
+	function u(key, width, inln, c1, int) {
+		f(key, level0 + 1, 0, width, inln, c1, int)
+	}
+
+	function n(key, width, inln, c1, int) {
+		f(key, level0, width0, width, inln, c1, int)
+	}
+
+	function samples(n) {
+		return n === 1 ? '1 sample' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' samples';
+	}
+
+	function pct(a, b) {
+		return a >= b ? '100' : (100 * a / b).toFixed(2);
+	}
+
+	function findFrame(frames, x) {
+		let left = 0;
+		let right = frames.length - 1;
+
+		while (left <= right) {
+			const mid = (left + right) >>> 1;
+			const f = frames[mid];
+
+			if (f.left > x) {
+				right = mid - 1;
+			} else if (f.left + f.width <= x) {
+				left = mid + 1;
+			} else {
+				return f;
+			}
+		}
+
+		if (frames[left] && (frames[left].left - x) * px < 0.5) return frames[left];
+		if (frames[right] && (x - (frames[right].left + frames[right].width)) * px < 0.5) return frames[right];
+
+		return null;
+	}
+
+	function search(r) {
+		if (r === true && (r = prompt('Enter regexp to search:', '')) === null) {
+			return;
+		}
+
+		pattern = r ? RegExp(r) : undefined;
+		const matched = render(root, rootLevel);
+		document.getElementById('matchval').textContent = pct(matched, root.width) + '%';
+		document.getElementById('match').style.display = r ? 'inline-block' : 'none';
+	}
+
+	function render(newRoot, newLevel) {
+		if (root) {
+			c.fillStyle = '#ffffff';
+			c.fillRect(0, 0, canvasWidth, canvasHeight);
+		}
+
+		root = newRoot || levels[0][0];
+		rootLevel = newLevel || 0;
+		px = canvasWidth / root.width;
+
+		const x0 = root.left;
+		const x1 = x0 + root.width;
+		const marked = [];
+
+		function mark(f) {
+			return marked[f.left] >= f.width || (marked[f.left] = f.width);
+		}
+
+		function totalMarked() {
+			let total = 0;
+			let left = 0;
+			Object.keys(marked).sort(function(a, b) { return a - b; }).forEach(function(x) {
+				if (+x >= left) {
+					total += marked[x];
+					left = +x + marked[x];
+				}
+			});
+			return total;
+		}
+
+		function drawFrame(f, y, alpha) {
+			if (f.left < x1 && f.left + f.width > x0) {
+				c.fillStyle = pattern && f.title.match(pattern) && mark(f) ? '#ee00ee' : f.color;
+				c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+
+				if (f.width * px >= 21) {
+					const chars = Math.floor(f.width * px / 7);
+					const title = f.title.length <= chars ? f.title : f.title.substring(0, chars - 2) + '..';
+					c.fillStyle = '#000000';
+					c.fillText(title, Math.max(f.left - x0, 0) * px + 3, y + 12, f.width * px - 6);
+				}
+
+				if (alpha) {
+					c.fillStyle = 'rgba(255, 255, 255, 0.5)';
+					c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+				}
+			}
+		}
+
+		for (let h = 0; h < levels.length; h++) {
+			const y = reverse ? h * 16 : canvasHeight - (h + 1) * 16;
+			const frames = levels[h];
+			for (let i = 0; i < frames.length; i++) {
+				drawFrame(frames[i], y, h < rootLevel);
+			}
+		}
+
+		return totalMarked();
+	}
+
+	function unpack(cpool) {
+		for (let i = 1; i < cpool.length; i++) {
+			cpool[i] = cpool[i - 1].substring(0, cpool[i].charCodeAt(0) - 32) + cpool[i].substring(1);
+		}
+	}
+
+	canvas.onmousemove = function() {
+		const h = Math.floor((reverse ? event.offsetY : (canvasHeight - event.offsetY)) / 16);
+		if (h >= 0 && h < levels.length) {
+			const f = findFrame(levels[h], event.offsetX / px + root.left);
+			if (f) {
+				if (f !== root) getSelection().removeAllRanges();
+				hl.style.left = (Math.max(f.left - root.left, 0) * px + canvas.offsetLeft) + 'px';
+				hl.style.width = (Math.min(f.width, root.width) * px) + 'px';
+				hl.style.top = ((reverse ? h * 16 : canvasHeight - (h + 1) * 16) + canvas.offsetTop) + 'px';
+				hl.firstChild.textContent = f.title;
+				hl.style.display = 'block';
+				canvas.title = f.title + '\n(' + samples(f.width) + f.details + ', ' + pct(f.width, levels[0][0].width) + '%)';
+				canvas.style.cursor = 'pointer';
+				canvas.onclick = function() {
+					if (f !== root) {
+						render(f, h);
+						canvas.onmousemove();
+					}
+				};
+				status.textContent = 'Function: ' + canvas.title;
+				status.style.display = 'inline-block';
+				return;
+			}
+		}
+		canvas.onmouseout();
+	}
+
+	canvas.onmouseout = function() {
+		hl.style.display = 'none';
+		status.style.display = 'none';
+		canvas.title = '';
+		canvas.style.cursor = '';
+		canvas.onclick = null;
+	}
+
+	canvas.ondblclick = function() {
+		getSelection().selectAllChildren(hl);
+	}
+
+	document.getElementById('reverse').onclick = function() {
+		reverse = !reverse;
+		render();
+	}
+
+	document.getElementById('search').onclick = function() {
+		search(true);
+	}
+
+	document.getElementById('reset').onclick = function() {
+		search(false);
+	}
+
+	window.onkeydown = function() {
+		if (event.ctrlKey && event.keyCode === 70) {
+			event.preventDefault();
+			search(true);
+		} else if (event.keyCode === 27) {
+			search(false);
+		}
+	}
+
+const cpool = [
+'all',
+' AccessInternal::PostRuntimeDispatch<G1BarrierSet::AccessBarrier<286822ull, G1BarrierSet>, (AccessInternal::BarrierType)3, 286822ull>::oop_access_barrier(oopDesc*, long)',
+' BarrierSetStackChunk::decode_gc_mode(stackChunkOopDesc*, OopIterator*)',
+'!ytecodeStream::next()',
+' C2Compiler::compile_method(ciEnv*, ciMethod*, int, bool, DirectiveSet*)',
+'!ProjNode::is_CFG() const',
+'!ompilation::Compilation(AbstractCompiler*, ciEnv*, ciMethod*, int, BufferBlob*, bool, DirectiveSet*)',
+'-compile_method()',
+'&e::Code_Gen()',
+'+mpile(ciEnv*, ciMethod*, int, Options, DirectiveSet*)',
+')Optimize()',
+')optimize_loops(PhaseIterGVN&, LoopOptsMode)',
+'\'Broker::compiler_thread_loop()',
+'/invoke_compiler_on_method(CompileTask*)',
+'\'dIC::set_to_monomorphic(CompiledICInfo&)',
+'\'r::compile_method(ciEnv*, ciMethod*, int, bool, DirectiveSet*)',
+'"nt thaw',
+'$inuation::prepare_thaw(JavaThread*, bool)',
+' FreeCSetClosure::do_heap_region(HeapRegion*)',
+' G1BatchedTask::work(unsigned int)',
+'"CardSetMemoryManager::flush()',
+'#odeRootSet::contains(nmethod*)',
+'$llectedHeap::free_region(HeapRegion*, FreeRegionList*)',
+'1par_iterate_regions_array(HeapRegionClosure*, HeapRegionClaimer*, unsigned int const*, unsigned long, unsigned int) const',
+'1register_nmethod(nmethod*)',
+'"PostEvacuateCollectionSetCleanupTask2::FreeCollectionSetTask::do_work(unsigned int)',
+'!enerateOopMap::compute_map(Thread*)',
+'!raphKit::clone_map()',
+' HeapRegion::hr_clear(bool)',
+'*RemSet::add_code_root_locked(nmethod*)',
+'2clear_locked(bool)',
+' I2C/C2I adapters',
+'!dealLoopTree::check_safepts(VectorSet&, Node_List&)',
+'/iteration_split(PhaseIdealLoop*, Node_List&)',
+'>_impl(PhaseIdealLoop*, Node_List&)',
+' JVM_IHashCode',
+'!avaFrameAnchor::make_walkable()',
+'$Thread::thread_main_inner()',
+'*ParkedState::JavaThreadParkedState(JavaThread*, bool)',
+' Method::mask_for(int, InterpreterOopMap*)',
+'!onitorDeflationThread::monitor_deflation_thread_entry(JavaThread*, JavaThread*)',
+'\'List::unlink_deflated(Thread*, LogStream*, elapsedTimer*, GrowableArray<ObjectMonitor*>*)',
+' ObjectMonitor::EnterI(JavaThread*)',
+'0xitEpilog(JavaThread*, ObjectWaiter*)',
+'/TrySpin(JavaThread*)',
+'/deflate_monitor()',
+'/enter(JavaThread*)',
+'&Synchronizer::chk_for_block_req(JavaThread*, char const*, char const*, unsigned long, LogStream*, elapsedTimer*)',
+'4deflate_idle_monitors(ObjectMonitorsHashtable*)',
+'<monitor_list(Thread*, LogStream*, elapsedTimer*, ObjectMonitorsHashtable*)',
+'4enter(Handle, BasicLock*, JavaThread*)',
+'5xit(oopDesc*, BasicLock*, JavaThread*)',
+'4inflate(Thread*, oopDesc*, ObjectSynchronizer::InflateCause)',
+'!opMapCache::compute_one_oop_map(methodHandle const&, int, InterpreterOopMap*)',
+'+Entry::fill(methodHandle const&, int)',
+'&ForCacheEntry::compute_map(Thread*)',
+'#Storage::Block::release_entries(unsigned long, OopStorage*)',
+',release(oopDesc* const*)',
+' Parker::park(bool, long)',
+'(unpark()',
+'#se::Parse(JVMState*, ciMethod*, float)',
+'%Generator::generate(JVMState*)',
+'!haseCCP::do_transform()',
+'*transform(Node*)',
+'&FG::do_global_code_motion()',
+'*global_code_motion()',
+'*schedule_local(Block*, GrowableArray<int>&, VectorSet&, long*)',
+'+elect(Block*, Node_List&, GrowableArray<int>&, VectorSet&, unsigned int, long*)',
+'&haitin::Register_Allocate()',
+'%IdealLoop::Dominators()',
+'0PhaseIdealLoop(PhaseIterGVN&, LoopOptsMode)',
+'0build_and_optimize()',
+'0clone_loop(IdealLoopTree*, Node_List&, int, PhaseIdealLoop::CloneLoopMode, Node*)',
+'1reate_slow_version_of_loop(IdealLoopTree*, Node_List&, IfNode*, PhaseIdealLoop::CloneLoopMode)',
+'0do_unswitching(IdealLoopTree*, Node_List&)',
+'0fix_body_edges(Node_List const&, IdealLoopTree*, Node_List const&, int, IdealLoopTree*, bool)',
+'0optimize(PhaseIterGVN&, LoopOptsMode)',
+'%Live::add_liveout(Block_List&, Block*, unsigned int, VectorSet&)',
+'+compute(unsigned int)',
+'!latformEvent::park_nanos(long)',
+'/unpark()',
+' SafeFetch32_impl',
+')N_impl',
+'$PointNode::Opcode() const',
+'!haredRuntime::complete_monitor_locking_C(oopDesc*, BasicLock*, JavaThread*)',
+'@unlocking_C(oopDesc*, BasicLock*, JavaThread*)',
+'/monitor_enter_helper(oopDesc*, BasicLock*, JavaThread*)',
+'/resolve_helper(bool, bool, JavaThread*)',
+'7opt_virtual_call_C(JavaThread*)',
+'7sub_helper(bool, bool, JavaThread*)',
+'A_internal(methodHandle, frame const&, CompiledMethod*, bool, bool, Handle, CallInfo&, Bytecodes::Code, JavaThread*)',
+'!pinPause',
+' ThawBase::thaw_slow(stackChunkOopDesc*, bool)',
+'"read::call_run()',
+' Unsafe_Park(JNIEnv_*, _jobject*, unsigned char, long)',
+'\'Unpark(JNIEnv_*, _jobject*, _jobject*)',
+' WorkerThread::run()',
+' ZThread::~ZThread()',
+' [unknown_Java]',
+' __gettimeofday',
+'"psynch_cvsignal',
+'+wait',
+')mutexwait',
+'!complete_monitor_locking_Java',
+'!notify_jvmti_vthread_mount',
+'!pthread_cond_updateval',
+'.wait',
+')mutex_droplock',
+'/firstfit_lock_slow',
+')start',
+' ciEnv::register_method(ciMethod*, int, CodeOffsets*, int, CodeBuffer*, int, OopMapSet*, ExceptionHandlerTable*, ImplicitExceptionTable*, AbstractCompiler*, bool, bool, bool, int, RTMState)',
+'!ont return barrier exception handler',
+' frame::oops_interpreted_do(OopClosure*, RegisterMap const*, bool) const',
+' gears/async/Async$$anon$1.use(Lscala/Function1;Lgears/async/Async;)Ljava/lang/Object;',
+'2.blocking(Lscala/Function1;Lgears/async/AsyncSupport;Lgears/async/Scheduler;)Ljava/lang/Object;',
+'3group(Lscala/Function1;Lgears/async/Async;)Ljava/lang/Object;',
+'3withNewCompletionGroup(Lgears/async/CompletionGroup;Lscala/Function1;Lgears/async/Async;)Ljava/lang/Object;',
+'2Blocking$$Lambda.0x00000008001dd2d8.apply()Ljava/lang/Object;',
+'<anon$2.complete(Ljava/lang/Object;Lgears/async/Async$Source;)V',
+'KNow(Ljava/lang/Object;Lgears/async/Async$Source;)Z',
+':.await$$anonfun$1(Lgears/async/Async$Source;)Ljava/lang/Object;',
+'@(Lgears/async/Async$Source;)Ljava/lang/Object;',
+',Cancellable.link$(Lgears/async/Cancellable;Lgears/async/CompletionGroup;)Lgears/async/Cancellable;',
+'<(Lgears/async/CompletionGroup;)Lgears/async/Cancellable;',
+'8unlink$(Lgears/async/Cancellable;)Lgears/async/Cancellable;',
+'>()Lgears/async/Cancellable;',
+'-ompletionGroup.add(Lgears/async/Cancellable;)V',
+'<drop(Lgears/async/Cancellable;)V',
+',Future$RunnableFuture$FutureAsync$$Lambda.0x00000008001e5ac0.apply()Ljava/lang/Object;',
+'NAwaitListener.apply(Lgears/async/Suspension;)V',
+'cjava/lang/Object;)Ljava/lang/Object;',
+'\\complete(Ljava/lang/Object;Lgears/async/Async$Source;)V',
+'dNow(Ljava/lang/Object;Lgears/async/Async$Source;)Z',
+'\\link(Lgears/async/CompletionGroup;)Lgears/async/Cancellable;',
+'\\unlink()Lgears/async/Cancellable;',
+'M.await$$anonfun$1(Lgears/async/Async$Source;)Ljava/lang/Object;',
+'S(Lgears/async/Async$Source;)Ljava/lang/Object;',
+',Listener.completeNow$(Lgears/async/Listener;Ljava/lang/Object;Lgears/async/Async$Source;)Z',
+'@(Ljava/lang/Object;Lgears/async/Async$Source;)Z',
+',Resource$$anon$1$$Lambda.0x00000008001cb3b8.apply(Ljava/lang/Object;)Ljava/lang/Object;',
+'<.use$$anonfun$1(Lscala/Function1;Lgears/async/Async;Ljava/lang/Object;)Ljava/lang/Object;',
+'@(Lscala/Function1;Lgears/async/Async;)Ljava/lang/Object;',
+',VThreadSupport$.resumeAsync(Lgears/async/Suspension;Ljava/lang/Object;Lgears/async/Scheduler;)V',
+'UVThreadSupport$VThreadSuspension;Ljava/lang/Object;Lgears/async/VThreadScheduler$;)V',
+'<suspend(Lscala/Function1;Lgears/async/VThreadSupport$VThreadLabel;)Ljava/lang/Object;',
+'Vjava/lang/Object;)Ljava/lang/Object;',
+';VThreadLabel.clearResult()V',
+'BSuspension.<init>(Lgears/async/VThreadSupport$VThreadLabel;)V',
+'MsetInput(Ljava/lang/Object;)V',
+'MwaitInput()Ljava/lang/Object;',
+',micro/SummedSquares$$Lambda.0x000000080019dc50.apply(Ljava/lang/Object;)Ljava/lang/Object;',
+'?.gearsSqSumAsync(Lgears/async/micro/IntAsyncGearsState;)J',
+'E_sq_sum$$anonfun$1(Lgears/async/micro/AsyncShift;Lgears/async/Async;)J',
+'L(Lgears/async/micro/AsyncShift;)J',
+'2jmh_generated/SummedSquares_gearsSqSumAsync_jmhTest.gearsSqSumAsync_Throughput(Lorg/openjdk/jmh/runner/InfraControl;Lorg/openjdk/jmh/infra/ThreadParams;)Lorg/openjdk/jmh/results/BenchmarkTaskResult;',
+'vthrpt_jmhStub(Lorg/openjdk/jmh/runner/InfraControl;Lorg/openjdk/jmh/results/RawResults;Lorg/openjdk/jmh/infra/BenchmarkParams;Lorg/openjdk/jmh/infra/IterationParams;Lorg/openjdk/jmh/infra/ThreadParams;Lorg/openjdk/jmh/infra/Blackhole;Lorg/openjdk/jmh/infra/Control;ILgears/async/micro/jmh_generated/IntAsyncGearsState_jmhType;Lgears/async/micro/jmh_generated/SummedSquares_jmhType;)V',
+',stream/BufferedStreamChannel$Impl.pollRead()Lscala/Option;',
+'WLgears/async/Listener;)Z',
+'RSend(Lgears/async/stream/BufferedStreamChannel$ImplBase$CanSend;Lgears/async/Listener;)Z',
+'Xjava/lang/Object;)Lscala/Option;',
+'NsenderToBuf(Lgears/async/stream/BufferedStreamChannel$ImplBase$CanSend;Lgears/async/Listener;)Z',
+'MBase$$Lambda.0x00000008001dcdb8.apply()Ljava/lang/Object;',
+'ge5200.apply()Ljava/lang/Object;',
+'Sanon$10.onComplete(Lgears/async/Listener;)V',
+'[poll()Lscala/Option;',
+'RCanSend.onComplete(Lgears/async/Listener;)V',
+'SellBuf.matchSender(Lgears/async/stream/BufferedStreamChannel$ImplBase$CanSend;Lgears/async/Listener;)Z',
+'Q.cells()Lgears/async/stream/BufferedStreamChannel$ImplBase$CellBuf;',
+'Rpull(Lscala/Function1;)Lgears/async/stream/StreamPull;',
+'RreadStream$$anonfun$2(Lgears/async/Async;)Lscala/util/Either;',
+'\\(Lgears/async/Async;)Lscala/util/Either;',
+'Rsend$$anonfun$1(Lgears/async/Async;Ljava/lang/Object;)Lscala/util/Either;',
+'V(Ljava/lang/Object;Lgears/async/Async;)V',
+'3GenPull$$anon$7.pull(Lgears/async/Async;)Lscala/Option;',
+':.pull$(Lgears/async/stream/GenPull;Lscala/Function1;)Lgears/async/stream/StreamPull;',
+'3PullReaderStream$$Lambda.0x00000008001caff0.apply(Ljava/lang/Object;)Ljava/lang/Object;',
+'Ye54b8.apply(Ljava/lang/Object;)Ljava/lang/Object;',
+'C.$anonfun$1$$anonfun$1(Lgears/async/stream/StreamFolder;Lscala/runtime/ObjectRef;Ljava/lang/Object;Lgears/async/Async;)Z',
+'Dfold$$anonfun$4(ILgears/async/Async;Lgears/async/stream/StreamFolder;Ljava/lang/Object;)Lscala/util/Success;',
+'I(Lgears/async/stream/PullReaderStream;ILgears/async/stream/StreamFolder;Lgears/async/Async;)Lscala/util/Try;',
+'H(ILgears/async/stream/StreamFolder;Lgears/async/Async;)Lscala/util/Try;',
+'Dread$1(Lgears/async/stream/StreamFolder;Lgears/async/stream/StreamReader;Lgears/async/Async;)Ljava/lang/Object;',
+'COps$$Lambda.0x00000008001e7bd8.apply(Ljava/lang/Object;)Ljava/lang/Object;',
+'F.$anonfun$8$$anonfun$1(Lgears/async/stream/StreamSender;Ljava/lang/Object;Lgears/async/Async;)Z',
+'GtoPushStream$$anonfun$1$$anonfun$1(Lgears/async/stream/StreamReader;Lgears/async/stream/StreamSender;Lgears/async/Async;)V',
+'5shChannelStream$$anon$6$$Lambda.0x00000008001ca628.apply(Ljava/lang/Object;)Ljava/lang/Object;',
+'L.fold$$anonfun$4(ILgears/async/stream/StreamFolder;Lgears/async/Async;)Lscala/util/Try;',
+'Q(ILgears/async/stream/StreamFolder;Lgears/async/Async;)Lscala/util/Try;',
+'3Stream$package$Stream$ArrayStreamReader$$anon$3.pull(Lgears/async/Async;)Lscala/Option;',
+'9Folder$$anon$2.add(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;',
+' itable stub',
+' java/lang/Long.valueOf(J)Ljava/lang/Long;',
+'*Object.hashCode()I',
+'*System$2.parkVirtualThread()V',
+'3unparkVirtualThread(Ljava/lang/Thread;)V',
+'*Thread.interrupted()Z',
+'1run()V',
+'4With(Ljava/lang/Object;Ljava/lang/Runnable;)V',
+'*VirtualThread$$Lambda.0x000000080014a020.run()V',
+'7.getAndSetParkPermit(Z)Z',
+'8park()V',
+'<OnCarrierThread(ZJ)V',
+'8runContinuation()V',
+'8submitRunContinuation()V',
+'8unmount()V',
+':park()V',
+'8yieldContinuation()Z',
+'*invoke/DirectMethodHandle$Holder.invokeSpecial(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;',
+'1LambdaForm$MH.0x000000080010e000.invoke(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;',
+'N400.invokeExact_MT(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;',
+'*reflect/Method.invoke(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;',
+'%util/concurrent/CountDownLatch.await()V',
+'6yclicBarrier.await()I',
+'Cdowait(ZJ)I',
+'CnextGeneration()V',
+'5Executors$RunnableAdapter.call()Ljava/lang/Object;',
+'5ForkJoinPool$WorkQueue.push(Ljava/util/concurrent/ForkJoinTask;Ljava/util/concurrent/ForkJoinPool;Z)V',
+'LtopLevelExec(Ljava/util/concurrent/ForkJoinTask;Ljava/util/concurrent/ForkJoinPool$WorkQueue;)V',
+'A.awaitWork(Ljava/util/concurrent/ForkJoinPool$WorkQueue;)I',
+'Bexecute(Ljava/lang/Runnable;)V',
+'BmanagedBlock(Ljava/util/concurrent/ForkJoinPool$ManagedBlocker;)V',
+'BpoolSubmit(ZLjava/util/concurrent/ForkJoinTask;)Ljava/util/concurrent/ForkJoinTask;',
+'BrunWorker(Ljava/util/concurrent/ForkJoinPool$WorkQueue;)V',
+'Bscan(Ljava/util/concurrent/ForkJoinPool$WorkQueue;II)I',
+'CignalWork()V',
+'CubmissionQueue(Z)Ljava/util/concurrent/ForkJoinPool$WorkQueue;',
+'BunmanagedBlock(Ljava/util/concurrent/ForkJoinPool$ManagedBlocker;)V',
+'=Task$AdaptedRunnableAction.exec()Z',
+'BRunnableExecuteAction.exec()Z',
+'A.doExec()I',
+'=WorkerThread.run()V',
+'6utureTask.run()V',
+'5ThreadPoolExecutor$Worker.run()V',
+'G.runWorker(Ljava/util/concurrent/ThreadPoolExecutor$Worker;)V',
+'5locks/AbstractOwnableSynchronizer.getExclusiveOwnerThread()Ljava/lang/Thread;',
+'CQueuedSynchronizer$ConditionNode.block()Z',
+'_Object.await()V',
+'fenableWait(Ljava/util/concurrent/locks/AbstractQueuedSynchronizer$ConditionNode;)I',
+'fsignalAll()V',
+'U.acquire(I)V',
+'^Ljava/util/concurrent/locks/AbstractQueuedSynchronizer$Node;IZZZJ)I',
+']SharedInterruptibly(I)V',
+'VgetState()I',
+'Vrelease(I)Z',
+'VsignalNext(Ljava/util/concurrent/locks/AbstractQueuedSynchronizer$Node;)V',
+';LockSupport.park()V',
+'LLjava/lang/Object;)V',
+'KUntil(J)V',
+'Gunpark(Ljava/lang/Thread;)V',
+';ReentrantLock$Sync.lock()V',
+'NtryRelease(I)Z',
+'H.<init>()V',
+'Ilock()V',
+'Iunlock()V',
+'$_lang_Thread::set_thread_status(oopDesc*, JavaThreadStatus)',
+'!dk/internal/event/Event.<init>()V',
+'3VirtualThreadPinnedEvent.<init>()V',
+'-misc/Unsafe.park(ZJ)V',
+'9unpark(Ljava/lang/Object;)V',
+'2VirtualThreads.park()V',
+'Aunpark(Ljava/lang/Thread;)V',
+'-reflect/DirectMethodHandleAccessor.invoke(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;',
+'VImpl(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;',
+'-vm/Continuation.enterSpecial(Ljdk/internal/vm/Continuation;ZZ)V',
+'=run()V',
+' long* thaw<Config<(oop_kind)0, G1BarrierSet>>(JavaThread*, int)',
+' madvise',
+' nanov2_madvise_block',
+'4_locked',
+'!method::new_nmethod(methodHandle const&, int, int, CodeOffsets*, int, DebugInformationRecorder*, Dependencies*, CodeBuffer*, int, OopMapSet*, ExceptionHandlerTable*, ImplicitExceptionTable*, AbstractCompiler*, CompLevel, char*, int, JVMCINMethodData*)',
+'*method(Method*, CompilerType, int, int, int, CodeOffsets*, int, DebugInformationRecorder*, Dependencies*, CodeBuffer*, int, OopMapSet*, ExceptionHandlerTable*, ImplicitExceptionTable*, AbstractCompiler*, CompLevel, char*, int, JVMCINMethodData*)',
+')oops_do(OopClosure*, bool)',
+' org/openjdk/jmh/runner/BaseRunner.doSingle(Lorg/openjdk/jmh/infra/BenchmarkParams;Lorg/openjdk/jmh/runner/ActionMode;Lorg/openjdk/jmh/runner/IterationResultAcceptor;)V',
+'BrunBenchmark(Lorg/openjdk/jmh/infra/BenchmarkParams;Lorg/openjdk/jmh/runner/BenchmarkHandler;Lorg/openjdk/jmh/runner/IterationResultAcceptor;)V',
+'jdk/jmh/runner/IterationResultAcceptor;)V',
+'NsForked(Lorg/openjdk/jmh/runner/ActionPlan;Lorg/openjdk/jmh/runner/IterationResultAcceptor;)V',
+'8enchmarkHandler$BenchmarkTask.call()Ljava/lang/Object;',
+']org/openjdk/jmh/results/BenchmarkTaskResult;',
+'G.access$300(Lorg/openjdk/jmh/runner/BenchmarkHandler;Ljava/lang/Thread;)Lorg/openjdk/jmh/runner/BenchmarkHandler$WorkerData;',
+'HgetWorkerData(Ljava/lang/Thread;)Lorg/openjdk/jmh/runner/BenchmarkHandler$WorkerData;',
+'HrunIteration(Lorg/openjdk/jmh/infra/BenchmarkParams;Lorg/openjdk/jmh/infra/IterationParams;ZZ)Lorg/openjdk/jmh/results/IterationResult;',
+'7ForkedMain.main([Ljava/lang/String;)V',
+'=Runner.run()V',
+'7InfraControl.awaitWarmdownReady()V',
+'MupReady()V',
+'CL2.awaitWarmdownReady()V',
+'OupReady()V',
+' pthread_jit_write_protect_np',
+' scala/Function1$$Lambda.0x00000008001e75f0.apply(Ljava/lang/Object;)Ljava/lang/Object;',
+'&Option.getOrElse(Lscala/Function0;)Ljava/lang/Object;',
+'&Some$.apply(Ljava/lang/Object;)Lscala/Some;',
+'&Tuple2$.apply(Ljava/lang/Object;Ljava/lang/Object;)Lscala/Tuple2;',
+'&collection/mutable/AbstractBuffer.$plus$eq(Ljava/lang/Object;)Lscala/collection/mutable/Growable;',
+'ASet.$minus$eq(Ljava/lang/Object;)Lscala/collection/mutable/Shrinkable;',
+'Fplus$eq(Ljava/lang/Object;)Lscala/collection/mutable/Growable;',
+':rrayDeque.addOne(Ljava/lang/Object;)Lscala/collection/mutable/ArrayDeque;',
+'xGrowable;',
+'DremoveHeadOption(Z)Lscala/Option;',
+'Dscala$collection$mutable$ArrayDeque$$appendAssumingCapacity(Ljava/lang/Object;)Lscala/collection/mutable/ArrayDeque;',
+'iend_$eq(I)V',
+'9Growable.$plus$eq$(Lscala/collection/mutable/Growable;Ljava/lang/Object;)Lscala/collection/mutable/Growable;',
+'J(Ljava/lang/Object;)Lscala/collection/mutable/Growable;',
+'9HashSet.add(Ljava/lang/Object;)Z',
+'DOne(Ljava/lang/Object;)Lscala/collection/mutable/Growable;',
+'uHashSet;',
+'Aremove(Ljava/lang/Object;)Z',
+'AsubtractOne(Ljava/lang/Object;)Lscala/collection/mutable/HashSet;',
+'zShrinkable;',
+'9Shrinkable.$minus$eq$(Lscala/collection/mutable/Shrinkable;Ljava/lang/Object;)Lscala/collection/mutable/Shrinkable;',
+'M(Ljava/lang/Object;)Lscala/collection/mutable/Shrinkable;',
+'&runtime/BoxesRunTime.boxToBoolean(Z)Ljava/lang/Boolean;',
+'.ScalaRunTime$.array_apply(Ljava/lang/Object;I)Ljava/lang/Object;',
+'/tatics.anyHash(Ljava/lang/Object;)I',
+'.java8/JFunction2$mcJJJ$sp.apply(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;',
+'&util/Right$.apply(Ljava/lang/Object;)Lscala/util/Right;',
+'!ys_icache_invalidate',
+' thread_native_entry(Thread*)',
+'\'start',
+' void stackChunkOopDesc::fix_thawed_frame<SmallRegisterMap>(frame const&, SmallRegisterMap const*)'
+];
+unpack(cpool);
+
+n(3,534)
+u(787,5)
+u(131,1)
+u(140)
+f(684,2,1)
+n(827)
+u(676)
+u(2299)
+f(835,2,1)
+u(2299)
+f(891,2,1)
+u(2124)
+u(740)
+u(2548)
+u(20)
+u(900)
+u(316)
+u(428)
+u(436)
+u(444)
+u(212)
+u(28)
+f(1449,1,1,23)
+u(1345)
+u(1393)
+u(1385)
+u(1362)
+u(2314)
+f(684,7,1,22)
+u(348,21)
+u(644,13)
+u(867)
+f(819,11,1,12)
+f(803,9,12,8)
+f(412,8,8,1)
+u(420)
+f(1569,1,1,345)
+u(1577)
+u(1857)
+u(1865)
+u(1849)
+u(1721)
+u(1849)
+u(2209)
+u(2217)
+u(1681,344)
+u(2089)
+u(2097)
+u(1673)
+u(1665)
+u(1657)
+u(1233)
+u(1241)
+u(1209)
+u(1225)
+u(913)
+u(921)
+u(929)
+u(1201)
+u(1217)
+u(1481)
+u(1489)
+u(1497)
+u(1433)
+u(1441)
+u(1129)
+u(905)
+u(921)
+u(929)
+u(1113)
+u(1121)
+u(1401)
+u(1425)
+u(1449)
+f(1385,39,4,340)
+f(1361,40,3,287,36,0,0)
+f(1250,41,1,105,35,0,0)
+f(1281,42,17,69)
+u(1057)
+u(1097)
+u(1105)
+u(1049,68)
+u(1137,68,5,0,0)
+u(1145,68,5,0,0)
+u(1170,3)
+f(2026,50,1,2)
+u(1946)
+f(2002,52,1,1)
+u(1874)
+f(1185,49,1,65,2,0,0)
+u(2025,65,2,0,0)
+u(1945,65,2,0,0)
+u(1953,65,2,0,0)
+u(1985,65,2,0,0)
+f(2081,54,2,63)
+u(1553)
+u(1641)
+u(1594,1)
+n(1625,62,2,0,0)
+u(1753,62,2,0,0)
+u(1769,62,2,0,0)
+u(1729,61,1,0,0)
+u(1793,61,1,0,0)
+f(1985,62,1,60)
+u(2065)
+u(764)
+u(476,13)
+u(867)
+f(819,67,1,12)
+f(803,65,12,39)
+n(843,1)
+n(2299,7)
+f(1802,60,7,1)
+f(1523,46,1)
+f(1338,42,1)
+n(2329)
+n(2378,16)
+n(2514,1)
+f(2313,41,1,181)
+u(1289)
+u(1353,181,2,0,0)
+u(969,181,2,0,0)
+u(1314,1)
+u(1250)
+f(2313,45,1,180,1,0,0)
+u(937,180,1,0,0)
+f(961,47,1,179)
+u(1305,2)
+u(676,1)
+u(692)
+u(404)
+u(372)
+u(340)
+u(636)
+u(811)
+f(1258,49,1)
+f(1889,48,1,177)
+u(1562,1)
+n(1761,174)
+u(1809)
+u(1881)
+u(1961)
+u(2057)
+u(756)
+u(12,1)
+n(308)
+u(2036)
+f(468,55,1,169)
+f(811,56,2,166)
+n(851,1)
+u(859)
+f(2299,55,1,3)
+f(1898,49,3,2)
+u(1938)
+f(1410,40,2,50,32,0,0)
+u(1418,50,32,0,0)
+u(1514,50,32,0,0)
+u(2506,50,32,0,0)
+f(676,44,28,17)
+u(692)
+u(404)
+u(292,1)
+n(372,16)
+f(340,48,1,9)
+f(356,49,1,1)
+n(636,6)
+u(795,1)
+n(811,5)
+f(659,49,5,1)
+f(356,48,1,6)
+f(731,49,5,1)
+f(1530,44,1,4)
+n(2299,1)
+f(2225,10,1)
+u(2233)
+u(1697)
+u(1705)
+u(1713)
+u(1910,1,0,1,0)
+f(1841,1,1,143)
+u(1777)
+u(1745,50)
+u(1961,3)
+u(2057)
+u(756)
+u(468)
+u(811)
+f(1977,4,3,47)
+u(2057)
+u(756,46)
+u(468,44)
+u(795,6)
+n(811,38)
+f(2299,7,38,2)
+f(2036,6,2,1)
+f(1785,3,1,93)
+f(1737,4,2,91)
+u(1833)
+u(1817,1)
+u(1585)
+u(1617)
+u(2113)
+u(2105)
+u(1473)
+u(1505)
+u(1457)
+u(1465)
+u(1377)
+f(1825,6,1,90)
+u(1585)
+u(1617)
+u(2113)
+u(2105)
+u(1473)
+u(1505,90,5,0,0)
+f(1457,13,2,85)
+u(1465)
+u(1377)
+f(1273,16,4,74,8,0,0)
+f(953,17,5,7)
+u(1097)
+u(1105)
+u(945)
+u(2017,2)
+u(1993)
+u(1913)
+u(1921)
+u(1969)
+u(2073)
+u(1545)
+u(1606,2,0,1,0)
+f(1609,29,1,1)
+u(2049)
+u(2040)
+u(251)
+f(2025,21,1,5)
+u(1945)
+u(1953)
+u(1985)
+u(2065)
+u(764)
+u(803,4)
+n(2299,1)
+f(2322,17,1)
+n(2337,60,1,0,0)
+u(2401,60,1,0,0)
+u(2409,60,1,0,0)
+u(2369,60,1,0,0)
+u(2361,60,1,0,0)
+u(2385,60,1,0,0)
+u(676,59)
+u(692)
+u(404)
+u(372)
+u(340,9)
+u(356,4)
+n(636,1)
+u(811)
+f(651,28,1,2)
+n(659,1)
+n(780)
+f(356,27,1,26)
+n(651,16)
+n(659,8)
+f(2394,23,8,1)
+f(2514,17,1)
+f(2313,16,1,7)
+u(1297)
+u(1369)
+u(1089)
+u(2313)
+u(1025)
+u(1081)
+u(1073,2)
+u(993)
+u(1001)
+u(1065)
+u(977)
+u(985)
+u(1017)
+u(2345)
+u(2465)
+u(2473)
+u(2457)
+u(2449)
+u(2441)
+u(2497)
+u(1537)
+u(283)
+u(2299)
+f(1161,23,2,5)
+u(1153)
+u(1042,2,1,0,0)
+u(1034,2,1,0,0)
+u(1065,1)
+u(977)
+u(985)
+u(1009)
+u(2353)
+u(2401)
+u(2409)
+u(2425)
+u(2433)
+u(2417)
+u(2497)
+u(1537)
+u(283)
+u(2299)
+f(1322,27,1)
+u(1266)
+u(1330)
+u(2482)
+f(1178,25,1)
+u(2010)
+f(1193,25,1,2)
+u(1889)
+u(1762,2,1,0,0)
+u(1810,2,1,0,0)
+u(1882,2,1,0,0)
+u(1962,2,1,0,0)
+u(2074,2,1,0,0)
+u(1546,2,1,0,0)
+u(1602,2,1,0,0)
+f(1649,34,1,1)
+u(1634)
+f(2306,13,1)
+n(2490,2)
+f(1530,14,1,1)
+f(2249,1,1,2)
+u(2257)
+u(2201)
+u(2177)
+u(2193)
+u(2185)
+u(2241)
+u(2265,1)
+u(2281)
+u(1689)
+u(1929)
+u(1921)
+u(1969)
+u(2057)
+u(756)
+u(468)
+u(811)
+f(2273,8,1)
+u(2289)
+u(1689)
+u(1929)
+u(1921)
+u(708)
+u(700)
+u(716)
+u(724)
+u(116)
+u(2523)
+f(2539,1,1,16)
+u(875)
+u(2532)
+u(748)
+u(300,15)
+u(100,8)
+u(108)
+u(36,7)
+u(76)
+u(68,2)
+u(516,1)
+u(524)
+u(532)
+u(540)
+f(548,11,1)
+u(628)
+u(620)
+f(84,10,1,4)
+u(92,1)
+u(612)
+u(564)
+u(572)
+u(260)
+u(668)
+f(500,11,1)
+u(508)
+f(612,11,1,2)
+u(564)
+u(572)
+u(268,1)
+u(268)
+u(276)
+u(596)
+u(588)
+u(580)
+u(604)
+f(556,14,1)
+u(44)
+f(492,10,1)
+u(484)
+u(220)
+f(124,8,1)
+u(52)
+u(60)
+u(884)
+u(2156)
+u(2164)
+u(196)
+u(2172)
+u(236)
+u(172)
+f(324,6,1,7)
+u(388)
+u(332,1)
+n(380)
+n(396,4)
+u(364,3)
+f(452,10,1,1)
+n(460)
+f(380,9,1)
+f(2139,8,1)
+u(2147)
+u(2131)
+f(772,5,1)
+u(156)
+u(204)
+u(188)
+u(148)
+u(180)
+u(228)
+u(244)
+u(164)
+
+search();
+</script></body></html>
