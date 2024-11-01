@@ -1,8 +1,8 @@
 val scala3Version = "3.4.1"
 
-val vGears = "0.2.0-SNAPSHOT"
-val vFs2 = "3.10.2"
-val vRxJava = "3.1.8"
+val vGears = "0.2.0+71-45897ff5-SNAPSHOT"
+val vFs2 = "3.11.0"
+val vRxJava = "3.0.13"
 
 enablePlugins(JmhPlugin)
 
