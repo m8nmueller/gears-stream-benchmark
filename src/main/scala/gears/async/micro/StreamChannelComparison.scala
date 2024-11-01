@@ -7,7 +7,6 @@ import gears.async.default.given
 import gears.async.stream.BufferedStreamChannel
 import scala.compiletime.uninitialized
 import gears.async.Future
-import gears.async.stream.StreamResult
 import scala.util.boundary
 
 @BenchmarkMode(Array(Mode.Throughput))
@@ -42,8 +41,8 @@ class StreamChannelComparison:
           boundary:
             while true do
               ch.readStream() match
-                case StreamResult.Data(data) => num = num + data
-                case _                       => boundary.break()
+                case Right(data) => num = num + data
+                case _           => boundary.break()
           num
       )
 
